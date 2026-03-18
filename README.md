@@ -1,18 +1,29 @@
-# VPN Metrics Capture
+# watch-interface
 
-This folder captures VPN counters every 10 seconds and computes growth/ratio analytics in CSV.
+A shell script tool for capturing GnosisVPN / HOPR interface counters at a configurable interval and computing growth, rate, and packet-size analytics — all written to CSV for further analysis or live terminal dashboards.
 
-## Files
+## Overview
 
-- `watch_interface_statistics.sh`: single entrypoint with three subcommands:
-  - `collect`: gathers counters from `netstat`, `wg show`, `gnosis_vpn-ctl telemetry`, and writes raw + growth CSV in the same run
-  - `trends`: ratio/rate trends + packet-size trend lines
-  - `distribution`: packet-size histogram/distribution view (incoming/outgoing)
-- `data/`: generated CSV files.
+`watch_interface_statistics.sh` is a single entrypoint with three subcommands:
 
-## Capture data every 10s (raw + growth together)
+| Subcommand | Description |
+|---|---|
+| `collect` | Gathers counters from `netstat`, `wg show`, and `gnosis_vpn-ctl telemetry`; writes raw + growth CSVs in one run |
+| `trends` | Live terminal dashboard with sparklines for rate/ratio metrics and derived packet sizes |
+| `distribution` | Packet-size histogram (incoming / outgoing) from growth deltas |
 
-From this directory:
+Data is stored in `data/` (git-ignored).
+
+## Requirements
+
+- macOS or Linux with `bash`
+- `netstat`
+- `wg` (`wireguard-tools`) — `sudo` access required
+- `gnosis_vpn-ctl` with a working `telemetry` subcommand
+
+## Usage
+
+### Collect — capture counters every 10 s
 
 ```bash
 ./watch_interface_statistics.sh collect \
@@ -21,22 +32,18 @@ From this directory:
   --growth-output data/vpn_metrics_growth.csv
 ```
 
-Defaults:
+Defaults: interface `utun4`, `sudo wg show`, `gnosis_vpn-ctl telemetry`.
 
-- interface `utun4`
-- `sudo wg show`
-- telemetry command `gnosis_vpn-ctl telemetry`
-
-Useful options:
+Useful flags:
 
 ```bash
-./watch_interface_statistics.sh collect --once
-./watch_interface_statistics.sh collect --iface utun4
+./watch_interface_statistics.sh collect --once           # single snapshot and exit
+./watch_interface_statistics.sh collect --iface utun4   # specify network interface
 ```
 
-If you already have a raw CSV from a previous format, start with a new file path (or archive/remove the old file) because the collector enforces the current schema.
+> If you already have a raw CSV from a previous format, start with a new file path — the collector enforces the current schema and will reject mismatches.
 
-## Live Terminal Trends
+### Trends — live terminal dashboard
 
 ```bash
 ./watch_interface_statistics.sh trends \
@@ -45,17 +52,20 @@ If you already have a raw CSV from a previous format, start with a new file path
   --window 40
 ```
 
-Use `--once` to render one snapshot and exit.
-Use `--once <timestamp_unix_ms>` to render as if that timestamp were the latest measured row (rows after it are ignored).
-Use `--min_packet_size <bytes>` to exclude packet-size values `<=` threshold from packet-size trend/distribution stats.
-When filtering is enabled, output includes `min_packet_size_exclusive_gt=<bytes>` for traceability.
-Use `--format md` to render the metrics table as Markdown.
-The dashboard shows sparkline blocks (`▁▂▃▄▅▆▇█`) per metric.
-It also includes:
-- `packet_size_received_b_per_wg_packet`: `wireguard_transfer_received_bytes_delta / netstat_in_packets_delta`
-- `packet_size_sent_b_per_wg_packet`: `wireguard_transfer_sent_bytes_delta / netstat_out_packets_delta`
+Key flags:
 
-## Packet Size Distribution View
+| Flag | Description |
+|---|---|
+| `--once` | Render one snapshot and exit |
+| `--once <timestamp_unix_ms>` | Render as of a specific timestamp (rows after it are ignored) |
+| `--min_packet_size <bytes>` | Exclude packet-size values `<=` threshold from stats |
+| `--format md` | Render the metrics table as Markdown |
+
+The dashboard shows sparkline blocks (`▁▂▃▄▅▆▇█`) per metric and includes derived columns:
+- `packet_size_received_b_per_wg_packet` = `wireguard_transfer_received_bytes_delta / netstat_in_packets_delta`
+- `packet_size_sent_b_per_wg_packet` = `wireguard_transfer_sent_bytes_delta / netstat_out_packets_delta`
+
+### Distribution — packet-size histogram
 
 ```bash
 ./watch_interface_statistics.sh distribution \
@@ -64,45 +74,52 @@ It also includes:
   --window 40
 ```
 
-This view computes per-step packet sizes from growth deltas and shows histogram bins for:
-- `incoming_packet_size_b_per_wg_packet`
-- `outgoing_packet_size_b_per_wg_packet`
+Computes per-step packet sizes from growth deltas and shows histogram bins for `incoming_packet_size_b_per_wg_packet` and `outgoing_packet_size_b_per_wg_packet`.
 
-`--format md` also works in this subcommand and renders each histogram as a Markdown table.
-`--min_packet_size <bytes>` also applies in this subcommand.
+`--format md` and `--min_packet_size` also apply here.
 
-## Raw CSV columns
+## CSV Schema
 
-- `timestamp_unix_ms`
-- `netstat_interface`
-- `netstat_in_packets`
-- `netstat_out_packets`
-- `wireguard_transfer_received_bytes`
-- `wireguard_transfer_sent_bytes`
-- `hopr_packets_received`
-- `hopr_packets_sent`
+### Raw CSV
 
-## Growth CSV columns
+| Column | Description |
+|---|---|
+| `timestamp_unix_ms` | Unix timestamp in milliseconds |
+| `netstat_interface` | Network interface name |
+| `netstat_in_packets` | Cumulative inbound packet count |
+| `netstat_out_packets` | Cumulative outbound packet count |
+| `wireguard_transfer_received_bytes` | Cumulative WireGuard received bytes |
+| `wireguard_transfer_sent_bytes` | Cumulative WireGuard sent bytes |
+| `hopr_packets_received` | Cumulative HOPR packets received |
+| `hopr_packets_sent` | Cumulative HOPR packets sent |
 
-- `timestamp_unix_ms`
-- `previous_timestamp_unix_ms`
-- `interval_seconds`
-- `netstat_in_packets_delta`
-- `netstat_out_packets_delta`
-- `wireguard_transfer_received_bytes_delta`
-- `wireguard_transfer_sent_bytes_delta`
-- `hopr_packets_received_delta`
-- `hopr_packets_sent_delta`
-- `netstat_in_packets_rate_per_sec`
-- `netstat_out_packets_rate_per_sec`
-- `wireguard_transfer_received_bytes_rate_per_sec`
-- `wireguard_transfer_sent_bytes_rate_per_sec`
-- `hopr_packets_received_rate_per_sec`
-- `hopr_packets_sent_rate_per_sec`
-- `ratio_hopr_received_to_netstat_in_cumulative`
-- `ratio_hopr_sent_to_netstat_out_cumulative`
-- `ratio_hopr_received_to_netstat_in_delta`
-- `ratio_hopr_sent_to_netstat_out_delta`
-- `counter_reset_detected`
+### Growth CSV
 
-If `counter_reset_detected=yes`, at least one counter moved backwards (for example after service restart). Deltas/rates may be negative in that step.
+| Column | Description |
+|---|---|
+| `timestamp_unix_ms` | Unix timestamp in milliseconds |
+| `previous_timestamp_unix_ms` | Timestamp of the previous row |
+| `interval_seconds` | Elapsed seconds between rows |
+| `netstat_in_packets_delta` | Inbound packet count delta |
+| `netstat_out_packets_delta` | Outbound packet count delta |
+| `wireguard_transfer_received_bytes_delta` | WireGuard received bytes delta |
+| `wireguard_transfer_sent_bytes_delta` | WireGuard sent bytes delta |
+| `hopr_packets_received_delta` | HOPR received packets delta |
+| `hopr_packets_sent_delta` | HOPR sent packets delta |
+| `netstat_in_packets_rate_per_sec` | Inbound packet rate |
+| `netstat_out_packets_rate_per_sec` | Outbound packet rate |
+| `wireguard_transfer_received_bytes_rate_per_sec` | WireGuard received bytes rate |
+| `wireguard_transfer_sent_bytes_rate_per_sec` | WireGuard sent bytes rate |
+| `hopr_packets_received_rate_per_sec` | HOPR received packet rate |
+| `hopr_packets_sent_rate_per_sec` | HOPR sent packet rate |
+| `ratio_hopr_received_to_netstat_in_cumulative` | Cumulative HOPR-to-netstat received ratio |
+| `ratio_hopr_sent_to_netstat_out_cumulative` | Cumulative HOPR-to-netstat sent ratio |
+| `ratio_hopr_received_to_netstat_in_delta` | Per-interval HOPR-to-netstat received ratio |
+| `ratio_hopr_sent_to_netstat_out_delta` | Per-interval HOPR-to-netstat sent ratio |
+| `counter_reset_detected` | `yes` if any counter moved backwards (e.g. after service restart) |
+
+> When `counter_reset_detected=yes`, deltas and rates in that row may be negative.
+
+## License
+
+MIT
