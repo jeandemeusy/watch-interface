@@ -31,7 +31,7 @@ GROWTH_HEADER="timestamp_unix_ms,previous_timestamp_unix_ms,interval_seconds,net
 
 print_usage() {
   cat <<'USAGE'
-Usage: watch_vpn_trends.sh <subcommand> [options]
+Usage: watch_interface_statistics.sh <subcommand> [options]
 
 Subcommands:
   trends                  Trend dashboard

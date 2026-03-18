@@ -4,7 +4,7 @@ This folder captures VPN counters every 10 seconds and computes growth/ratio ana
 
 ## Files
 
-- `watch_vpn_trends.sh`: single entrypoint with three subcommands:
+- `watch_interface_statistics.sh`: single entrypoint with three subcommands:
   - `collect`: gathers counters from `netstat`, `wg show`, `gnosis_vpn-ctl telemetry`, and writes raw + growth CSV in the same run
   - `trends`: ratio/rate trends + packet-size trend lines
   - `distribution`: packet-size histogram/distribution view (incoming/outgoing)
@@ -15,7 +15,7 @@ This folder captures VPN counters every 10 seconds and computes growth/ratio ana
 From this directory:
 
 ```bash
-./watch_vpn_trends.sh collect \
+./watch_interface_statistics.sh collect \
   --interval-seconds 10 \
   --raw-output data/vpn_metrics_raw.csv \
   --growth-output data/vpn_metrics_growth.csv
@@ -30,8 +30,8 @@ Defaults:
 Useful options:
 
 ```bash
-./watch_vpn_trends.sh collect --once
-./watch_vpn_trends.sh collect --iface utun4
+./watch_interface_statistics.sh collect --once
+./watch_interface_statistics.sh collect --iface utun4
 ```
 
 If you already have a raw CSV from a previous format, start with a new file path (or archive/remove the old file) because the collector enforces the current schema.
@@ -39,7 +39,7 @@ If you already have a raw CSV from a previous format, start with a new file path
 ## Live Terminal Trends
 
 ```bash
-./watch_vpn_trends.sh trends \
+./watch_interface_statistics.sh trends \
   --input data/vpn_metrics_growth.csv \
   --interval-seconds 2 \
   --window 40
@@ -58,7 +58,7 @@ It also includes:
 ## Packet Size Distribution View
 
 ```bash
-./watch_vpn_trends.sh distribution \
+./watch_interface_statistics.sh distribution \
   --input data/vpn_metrics_growth.csv \
   --interval-seconds 2 \
   --window 40
