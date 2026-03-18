@@ -21,6 +21,7 @@ FAIL_FAST="0"
 # --- internal state (derived or runtime, not set via flags) ---
 SUBCOMMAND=""
 INPUT=""
+SELECTED_METRICS="ratio_hopr_received_to_netstat_in_delta:ratio_hopr_sent_to_netstat_out_delta:packet_size_received_b_per_wg_packet:packet_size_sent_b_per_wg_packet:hopr_packets_received_rate_per_sec:hopr_packets_sent_rate_per_sec"
 RAW_OUTPUT=""
 GROWTH_OUTPUT=""
 
@@ -344,7 +345,7 @@ render_dashboard() {
     return 0
   fi
 
-  awk -F',' -v window="$WINDOW" -v source="$INPUT" -v cutoff_ts="$ONCE_TIMESTAMP_UNIX_MS" -v output_format="$FORMAT" -v packet_size_floor="$PACKET_SIZE_FLOOR" '
+  awk -F',' -v window="$WINDOW" -v source="$INPUT" -v cutoff_ts="$ONCE_TIMESTAMP_UNIX_MS" -v output_format="$FORMAT" -v packet_size_floor="$PACKET_SIZE_FLOOR" -v selected_metrics="$SELECTED_METRICS" '
   function abs(x) {
     return x < 0 ? -x : x
   }
@@ -385,15 +386,15 @@ render_dashboard() {
     printf "%-45s %10s %10s %10s %10s %s\n", "---------------------------------------------", "----------", "----------", "----------", "----------", "----------------------------------------"
   }
 
-  function draw_metric(label, arr, start, end,    i, n, v, vi, last, sum, win_min, win_max, avg, sparkline, plot_lo, plot_hi, span, pad) {
+  function draw_metric(label, start, end,    i, n, v, vi, last, sum, win_min, win_max, avg, sparkline, plot_lo, plot_hi, span, pad, values) {
     n = 0
     sum = 0
     sparkline = ""
     for (i = start; i <= end; i++) {
-      if (arr[i] == "") {
+      if (!((label, i) in col_data)) {
         continue
       }
-      v = arr[i] + 0
+      v = col_data[label, i] + 0
       n++
       values[n] = v
       sum += v
@@ -435,7 +436,7 @@ render_dashboard() {
 
     vi = 0
     for (i = start; i <= end; i++) {
-      if (arr[i] == "") {
+      if (!((label, i) in col_data)) {
         sparkline = sparkline "_"
       } else {
         vi++
@@ -459,61 +460,44 @@ render_dashboard() {
   }
 
   {
+    if (!("timestamp_unix_ms" in col)) next
     current_ts = $(col["timestamp_unix_ms"])
     if (cutoff_ts != "" && (current_ts + 0) > (cutoff_ts + 0)) {
       next
     }
 
     rows++
-    ts[rows] = current_ts
-    interval[rows] = $(col["interval_seconds"])
-    ratio_recv_delta[rows] = $(col["ratio_hopr_received_to_netstat_in_delta"])
-    ratio_sent_delta[rows] = $(col["ratio_hopr_sent_to_netstat_out_delta"])
-    hopr_recv_rate[rows] = $(col["hopr_packets_received_rate_per_sec"])
-    hopr_sent_rate[rows] = $(col["hopr_packets_sent_rate_per_sec"])
 
-    wg_recv_delta = $(col["wireguard_transfer_received_bytes_delta"])
-    wg_sent_delta = $(col["wireguard_transfer_sent_bytes_delta"])
-    wg_in_packets_delta = $(col["netstat_in_packets_delta"])
-    wg_out_packets_delta = $(col["netstat_out_packets_delta"])
-    if (wg_recv_delta != "" && wg_in_packets_delta != "") {
-      if ((wg_in_packets_delta + 0) > 0) {
+    for (colname in col) {
+      col_data[colname, rows] = $(col[colname])
+    }
+
+    if (("wireguard_transfer_received_bytes_delta" in col) && ("netstat_in_packets_delta" in col)) {
+      wg_recv_delta = $(col["wireguard_transfer_received_bytes_delta"])
+      wg_in_packets_delta = $(col["netstat_in_packets_delta"])
+      if (wg_recv_delta != "" && wg_in_packets_delta != "" && (wg_in_packets_delta + 0) > 0) {
         packet_size_value = (wg_recv_delta + 0) / (wg_in_packets_delta + 0)
         if (packet_size_floor == "" || packet_size_value > (packet_size_floor + 0)) {
-          packet_size_received[rows] = packet_size_value
+          col_data["packet_size_received_b_per_wg_packet", rows] = packet_size_value
         }
       }
     }
-    if (wg_sent_delta != "" && wg_out_packets_delta != "") {
-      if ((wg_out_packets_delta + 0) > 0) {
+
+    if (("wireguard_transfer_sent_bytes_delta" in col) && ("netstat_out_packets_delta" in col)) {
+      wg_sent_delta = $(col["wireguard_transfer_sent_bytes_delta"])
+      wg_out_packets_delta = $(col["netstat_out_packets_delta"])
+      if (wg_sent_delta != "" && wg_out_packets_delta != "" && (wg_out_packets_delta + 0) > 0) {
         packet_size_value = (wg_sent_delta + 0) / (wg_out_packets_delta + 0)
         if (packet_size_floor == "" || packet_size_value > (packet_size_floor + 0)) {
-          packet_size_sent[rows] = packet_size_value
+          col_data["packet_size_sent_b_per_wg_packet", rows] = packet_size_value
         }
       }
     }
   }
 
   END {
-    required[1] = "timestamp_unix_ms"
-    required[2] = "interval_seconds"
-    required[3] = "ratio_hopr_received_to_netstat_in_delta"
-    required[4] = "ratio_hopr_sent_to_netstat_out_delta"
-    required[5] = "hopr_packets_received_rate_per_sec"
-    required[6] = "hopr_packets_sent_rate_per_sec"
-    required[7] = "wireguard_transfer_received_bytes_delta"
-    required[8] = "wireguard_transfer_sent_bytes_delta"
-    required[9] = "netstat_in_packets_delta"
-    required[10] = "netstat_out_packets_delta"
-
-    missing = ""
-    for (i = 1; i <= 10; i++) {
-      if (!(required[i] in col)) {
-        missing = missing " " required[i]
-      }
-    }
-    if (missing != "") {
-      print "Missing required columns in growth CSV:" missing > "/dev/stderr"
+    if (!("timestamp_unix_ms" in col) || !("interval_seconds" in col)) {
+      print "Missing required columns (timestamp_unix_ms, interval_seconds) in growth CSV" > "/dev/stderr"
       exit 2
     }
 
@@ -539,16 +523,14 @@ render_dashboard() {
     if (packet_size_floor != "") {
       printf "packet_size_floor_exclusive_gt=%s\n", packet_size_floor
     }
-    printf "rows=%d window_rows=%d latest_timestamp_unix_ms=%s latest_interval_seconds=%s\n", rows, rows - start + 1, ts[rows], interval[rows]
+    printf "rows=%d window_rows=%d latest_timestamp_unix_ms=%s latest_interval_seconds=%s\n", rows, rows - start + 1, col_data["timestamp_unix_ms", rows], col_data["interval_seconds", rows]
     print ""
     print_table_header()
 
-    draw_metric("ratio_hopr_received_to_netstat_in_delta", ratio_recv_delta, start, rows)
-    draw_metric("ratio_hopr_sent_to_netstat_out_delta", ratio_sent_delta, start, rows)
-    draw_metric("packet_size_received_b_per_wg_packet", packet_size_received, start, rows)
-    draw_metric("packet_size_sent_b_per_wg_packet", packet_size_sent, start, rows)
-    draw_metric("hopr_packets_received_rate_per_sec", hopr_recv_rate, start, rows)
-    draw_metric("hopr_packets_sent_rate_per_sec", hopr_sent_rate, start, rows)
+    n_sel = split(selected_metrics, sel_arr, ":")
+    for (s = 1; s <= n_sel; s++) {
+      draw_metric(sel_arr[s], start, rows)
+    }
   }
   ' "$INPUT"
 }
@@ -762,6 +744,108 @@ render_distribution() {
   ' "$INPUT"
 }
 
+select_metrics_menu() {
+  if [[ ! -f "$INPUT" ]]; then
+    printf '\033[H\033[2J'
+    echo "No growth CSV found at $INPUT — cannot show metric list"
+    sleep 2
+    return
+  fi
+
+  local header
+  header=$(head -1 "$INPUT" 2>/dev/null)
+  if [[ -z "$header" ]]; then
+    printf '\033[H\033[2J'
+    echo "Growth CSV has no header yet"
+    sleep 2
+    return
+  fi
+
+  local -a skip_cols=("timestamp_unix_ms" "previous_timestamp_unix_ms" "interval_seconds" "counter_reset_detected")
+  local -a keys=()
+  local col
+  IFS=',' read -ra all_cols <<< "$header"
+  for col in "${all_cols[@]}"; do
+    local skip=0
+    local s
+    for s in "${skip_cols[@]}"; do
+      if [[ "$col" == "$s" ]]; then
+        skip=1
+        break
+      fi
+    done
+    if [[ "$skip" == "0" ]]; then
+      keys+=("$col")
+    fi
+  done
+  keys+=("packet_size_received_b_per_wg_packet" "packet_size_sent_b_per_wg_packet")
+
+  local -a sel_flags=()
+  local i
+  for i in "${!keys[@]}"; do
+    case ":${SELECTED_METRICS}:" in
+      *":${keys[$i]}:"*) sel_flags[$i]=1 ;;
+      *) sel_flags[$i]=0 ;;
+    esac
+  done
+
+  local input
+  while true; do
+    printf '\033[H\033[2J'
+    echo "=== Metric Selection ==="
+    echo ""
+    for i in "${!keys[@]}"; do
+      local num=$((i + 1))
+      local state
+      if [[ "${sel_flags[$i]}" == "1" ]]; then
+        state="[x]"
+      else
+        state="[ ]"
+      fi
+      printf "%3d. %s %s\n" "$num" "$state" "${keys[$i]}"
+    done
+    echo ""
+    printf "Number + Enter: toggle  |  a: all  |  n: none  |  Enter: confirm\n> "
+
+    read -r input
+    case "$input" in
+      a|A)
+        for i in "${!keys[@]}"; do sel_flags[$i]=1; done
+        ;;
+      n|N)
+        for i in "${!keys[@]}"; do sel_flags[$i]=0; done
+        ;;
+      ""|q|Q)
+        break
+        ;;
+      *)
+        if [[ "$input" =~ ^[0-9]+$ ]]; then
+          local idx=$((input - 1))
+          if [[ $idx -ge 0 && $idx -lt ${#keys[@]} ]]; then
+            if [[ "${sel_flags[$idx]}" == "1" ]]; then
+              sel_flags[$idx]=0
+            else
+              sel_flags[$idx]=1
+            fi
+          fi
+        fi
+        ;;
+    esac
+  done
+
+  local new_sel=""
+  for i in "${!keys[@]}"; do
+    if [[ "${sel_flags[$i]}" == "1" ]]; then
+      if [[ -n "$new_sel" ]]; then
+        new_sel="${new_sel}:${keys[$i]}"
+      else
+        new_sel="${keys[$i]}"
+      fi
+    fi
+  done
+  SELECTED_METRICS="$new_sel"
+}
+
 parse_args() {
   if [[ $# -eq 0 ]]; then
     print_usage
@@ -898,7 +982,16 @@ main() {
       exit 0
     fi
 
-    sleep "$INTERVAL_SECONDS"
+    if [[ "$SUBCOMMAND" == "trends" ]]; then
+      printf "\n[Press 'm' to select metrics]\n"
+    fi
+
+    local key=""
+    if read -r -s -n 1 -t "$INTERVAL_SECONDS" key 2>/dev/null; then
+      case "$key" in
+        m|M) select_metrics_menu ;;
+      esac
+    fi
   done
 }
 
