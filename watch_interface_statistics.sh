@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
 set -u -o pipefail
 
-INPUT="data/vpn_metrics_growth.csv"
-RAW_OUTPUT="data/vpn_metrics_raw.csv"
-GROWTH_OUTPUT="data/vpn_metrics_growth.csv"
-INTERVAL_SECONDS="2"
-WINDOW="40"
+# --- constants (never modified after startup) ---
+OS_TYPE="$(uname -s)"
+RAW_HEADER="timestamp_unix_ms,netstat_interface,netstat_in_packets,netstat_out_packets,wireguard_transfer_received_bytes,wireguard_transfer_sent_bytes,hopr_packets_received,hopr_packets_sent"
+GROWTH_HEADER="timestamp_unix_ms,previous_timestamp_unix_ms,interval_seconds,netstat_in_packets_delta,netstat_out_packets_delta,wireguard_transfer_received_bytes_delta,wireguard_transfer_sent_bytes_delta,hopr_packets_received_delta,hopr_packets_sent_delta,netstat_in_packets_rate_per_sec,netstat_out_packets_rate_per_sec,wireguard_transfer_received_bytes_rate_per_sec,wireguard_transfer_sent_bytes_rate_per_sec,hopr_packets_received_rate_per_sec,hopr_packets_sent_rate_per_sec,ratio_hopr_received_to_netstat_in_cumulative,ratio_hopr_sent_to_netstat_out_cumulative,ratio_hopr_received_to_netstat_in_delta,ratio_hopr_sent_to_netstat_out_delta,counter_reset_detected"
+
+# --- cli parameters (defaults, overridable via flags) ---
+DATA_DIR="data"
+INTERVAL_SECONDS="1"
+WINDOW="30"
 NO_CLEAR="0"
 ONCE="0"
 ONCE_TIMESTAMP_UNIX_MS=""
 FORMAT="plain"
-SUBCOMMAND=""
-MIN_PACKET_SIZE=""
-IFACE="utun4"
-HOPR_COMMAND="gnosis_vpn-ctl telemetry"
-WG_USE_SUDO="1"
+PACKET_SIZE_FLOOR="0"
+IFACE=""
 FAIL_FAST="0"
+
+# --- internal state (derived or runtime, not set via flags) ---
+SUBCOMMAND=""
+INPUT=""
+RAW_OUTPUT=""
+GROWTH_OUTPUT=""
 
 collect_have_previous="0"
 collect_previous_timestamp_unix_ms=""
@@ -25,9 +32,6 @@ collect_previous_wg_received_bytes=""
 collect_previous_wg_sent_bytes=""
 collect_previous_hopr_received_packets=""
 collect_previous_hopr_sent_packets=""
-
-RAW_HEADER="timestamp_unix_ms,netstat_interface,netstat_in_packets,netstat_out_packets,wireguard_transfer_received_bytes,wireguard_transfer_sent_bytes,hopr_packets_received,hopr_packets_sent"
-GROWTH_HEADER="timestamp_unix_ms,previous_timestamp_unix_ms,interval_seconds,netstat_in_packets_delta,netstat_out_packets_delta,wireguard_transfer_received_bytes_delta,wireguard_transfer_sent_bytes_delta,hopr_packets_received_delta,hopr_packets_sent_delta,netstat_in_packets_rate_per_sec,netstat_out_packets_rate_per_sec,wireguard_transfer_received_bytes_rate_per_sec,wireguard_transfer_sent_bytes_rate_per_sec,hopr_packets_received_rate_per_sec,hopr_packets_sent_rate_per_sec,ratio_hopr_received_to_netstat_in_cumulative,ratio_hopr_sent_to_netstat_out_cumulative,ratio_hopr_received_to_netstat_in_delta,ratio_hopr_sent_to_netstat_out_delta,counter_reset_detected"
 
 print_usage() {
   cat <<'USAGE'
@@ -39,17 +43,16 @@ Subcommands:
   collect                 Collect raw/growth CSV metrics
 
 Options:
-  --input PATH             Growth CSV path for watch subcommands (default: data/vpn_metrics_growth.csv)
-  --raw-output PATH        Raw CSV path for collect subcommand (default: data/vpn_metrics_raw.csv)
-  --growth-output PATH     Growth CSV path for collect subcommand (default: data/vpn_metrics_growth.csv)
-  --interval-seconds N     Refresh interval in seconds (default: 2 for watch, 10 for collect)
+  --data DIR               Data directory; collect writes raw.csv and growth.csv there,
+                           trends/distribution read growth.csv from there (default: data)
+  --interval N             Refresh interval in seconds (default: 1)
   --window N               Number of recent rows to include in selected view (default: 40)
   --no-clear               Do not clear the terminal between refreshes
-  --once [TIMESTAMP_MS]    Render one snapshot and exit; optionally treat TIMESTAMP_MS as latest row cutoff
-  --min_packet_size BYTES
-                           Exclude packet-size values <= BYTES from trend/distribution packet-size metrics
+  --once                   Render one snapshot and exit (trends/distribution); collect one sample and exit (collect)
+  --at TIMESTAMP_MS        Treat TIMESTAMP_MS as the latest row cutoff (trends/distribution only)
+  --packet-size-floor N    Exclude packet-size values <= N from trend/distribution metrics (default: 0)
   --format plain|md        Table format (default: plain)
-  --iface NAME             Interface for netstat -I (collect; default: utun4)
+  --iface NAME             Interface to monitor (collect; required)
   --fail-fast              Exit immediately on sample failure (collect)
   -h, --help               Show this help
 USAGE
@@ -182,20 +185,37 @@ collect_load_previous_from_raw() {
   collect_have_previous="1"
 }
 
-collect_one_sample() {
-  local netstat_output wg_output hopr_output
-  netstat_output="$(netstat -I "$IFACE" -n)" || return 1
-
-  if [[ "$WG_USE_SUDO" == "1" ]]; then
-    wg_output="$(sudo wg show)" || return 1
+collect_netstat_packets() {
+  if [[ "$OS_TYPE" == "Linux" ]]; then
+    awk -v iface="$IFACE" -F':' '
+      {
+        key = $1
+        sub(/^[[:space:]]+/, "", key)
+        if (key == iface) {
+          split($2, f)
+          # /proc/net/dev fields after colon:
+          # rx: bytes(1) packets(2) errs(3) drop(4) fifo(5) frame(6) compressed(7) multicast(8)
+          # tx: bytes(9)  packets(10) ...
+          print f[2], f[10]
+          exit
+        }
+      }
+    ' /proc/net/dev
   else
-    wg_output="$(wg show)" || return 1
+    netstat -I "$IFACE" -n | awk -v iface="$IFACE" \
+      '$1 == iface && $(NF-4) ~ /^[0-9]+$/ && $(NF-2) ~ /^[0-9]+$/ { print $(NF-4), $(NF-2); exit }'
   fi
+}
 
-  hopr_output="$(bash -lc "$HOPR_COMMAND")" || return 1
+collect_one_sample() {
+  local netstat_packets wg_output hopr_output
+
+  netstat_packets="$(collect_netstat_packets)" || return 1
+  wg_output="$(sudo wg show)" || return 1
+  hopr_output="$(bash -lc "gnosis_vpn-ctl telemetry")" || return 1
 
   local netstat_in_packets netstat_out_packets
-  read -r netstat_in_packets netstat_out_packets <<< "$(printf '%s\n' "$netstat_output" | awk -v iface="$IFACE" '$1 == iface && $(NF-4) ~ /^[0-9]+$/ && $(NF-2) ~ /^[0-9]+$/ { print $(NF-4), $(NF-2); exit }')"
+  read -r netstat_in_packets netstat_out_packets <<< "$netstat_packets"
 
   local wg_received_value wg_received_unit wg_sent_value wg_sent_unit
   read -r wg_received_value wg_received_unit wg_sent_value wg_sent_unit <<< "$(printf '%s\n' "$wg_output" | awk '/transfer:/ { print $2, $3, $5, $6; exit }')"
@@ -294,7 +314,7 @@ collect_run() {
   echo "Collecting every ${INTERVAL_SECONDS}s"
   echo "raw_csv=$(cd "$(dirname "$RAW_OUTPUT")" && pwd)/$(basename "$RAW_OUTPUT")"
   echo "growth_csv=$(cd "$(dirname "$GROWTH_OUTPUT")" && pwd)/$(basename "$GROWTH_OUTPUT")"
-  echo "iface=${IFACE} wg_use_sudo=${WG_USE_SUDO}"
+  echo "iface=${IFACE}"
 
   while true; do
     local started_ms ended_ms elapsed_ms sleep_seconds
@@ -324,7 +344,7 @@ render_dashboard() {
     return 0
   fi
 
-  awk -F',' -v window="$WINDOW" -v source="$INPUT" -v cutoff_ts="$ONCE_TIMESTAMP_UNIX_MS" -v output_format="$FORMAT" -v min_packet_size="$MIN_PACKET_SIZE" '
+  awk -F',' -v window="$WINDOW" -v source="$INPUT" -v cutoff_ts="$ONCE_TIMESTAMP_UNIX_MS" -v output_format="$FORMAT" -v packet_size_floor="$PACKET_SIZE_FLOOR" '
   function abs(x) {
     return x < 0 ? -x : x
   }
@@ -365,7 +385,7 @@ render_dashboard() {
     printf "%-45s %10s %10s %10s %10s %s\n", "---------------------------------------------", "----------", "----------", "----------", "----------", "----------------------------------------"
   }
 
-  function draw_metric(label, arr, start, end,    i, n, v, last, sum, win_min, win_max, avg, sparkline, plot_lo, plot_hi, span, pad) {
+  function draw_metric(label, arr, start, end,    i, n, v, vi, last, sum, win_min, win_max, avg, sparkline, plot_lo, plot_hi, span, pad) {
     n = 0
     sum = 0
     sparkline = ""
@@ -413,8 +433,14 @@ render_dashboard() {
       plot_hi = plot_lo + 1
     }
 
-    for (i = 1; i <= n; i++) {
-      sparkline = sparkline spark_char(spark_level(values[i], plot_lo, plot_hi))
+    vi = 0
+    for (i = start; i <= end; i++) {
+      if (arr[i] == "") {
+        sparkline = sparkline "_"
+      } else {
+        vi++
+        sparkline = sparkline spark_char(spark_level(values[vi], plot_lo, plot_hi))
+      }
     }
 
     if (output_format == "md") {
@@ -453,7 +479,7 @@ render_dashboard() {
     if (wg_recv_delta != "" && wg_in_packets_delta != "") {
       if ((wg_in_packets_delta + 0) > 0) {
         packet_size_value = (wg_recv_delta + 0) / (wg_in_packets_delta + 0)
-        if (min_packet_size == "" || packet_size_value > (min_packet_size + 0)) {
+        if (packet_size_floor == "" || packet_size_value > (packet_size_floor + 0)) {
           packet_size_received[rows] = packet_size_value
         }
       }
@@ -461,7 +487,7 @@ render_dashboard() {
     if (wg_sent_delta != "" && wg_out_packets_delta != "") {
       if ((wg_out_packets_delta + 0) > 0) {
         packet_size_value = (wg_sent_delta + 0) / (wg_out_packets_delta + 0)
-        if (min_packet_size == "" || packet_size_value > (min_packet_size + 0)) {
+        if (packet_size_floor == "" || packet_size_value > (packet_size_floor + 0)) {
           packet_size_sent[rows] = packet_size_value
         }
       }
@@ -510,8 +536,8 @@ render_dashboard() {
     if (cutoff_ts != "") {
       printf "as_of_timestamp_unix_ms=%s\n", cutoff_ts
     }
-    if (min_packet_size != "") {
-      printf "min_packet_size_exclusive_gt=%s\n", min_packet_size
+    if (packet_size_floor != "") {
+      printf "packet_size_floor_exclusive_gt=%s\n", packet_size_floor
     }
     printf "rows=%d window_rows=%d latest_timestamp_unix_ms=%s latest_interval_seconds=%s\n", rows, rows - start + 1, ts[rows], interval[rows]
     print ""
@@ -533,7 +559,7 @@ render_distribution() {
     return 0
   fi
 
-  awk -F',' -v window="$WINDOW" -v source="$INPUT" -v cutoff_ts="$ONCE_TIMESTAMP_UNIX_MS" -v output_format="$FORMAT" -v min_packet_size="$MIN_PACKET_SIZE" '
+  awk -F',' -v window="$WINDOW" -v source="$INPUT" -v cutoff_ts="$ONCE_TIMESTAMP_UNIX_MS" -v output_format="$FORMAT" -v packet_size_floor="$PACKET_SIZE_FLOOR" '
   function repeat_char(ch, n,    i, out) {
     out = ""
     for (i = 0; i < n; i++) {
@@ -672,7 +698,7 @@ render_distribution() {
     if (wg_recv_delta != "" && wg_in_packets_delta != "") {
       if ((wg_in_packets_delta + 0) > 0) {
         packet_size_value = (wg_recv_delta + 0) / (wg_in_packets_delta + 0)
-        if (min_packet_size == "" || packet_size_value > (min_packet_size + 0)) {
+        if (packet_size_floor == "" || packet_size_value > (packet_size_floor + 0)) {
           packet_size_received[rows] = packet_size_value
         }
       }
@@ -680,7 +706,7 @@ render_distribution() {
     if (wg_sent_delta != "" && wg_out_packets_delta != "") {
       if ((wg_out_packets_delta + 0) > 0) {
         packet_size_value = (wg_sent_delta + 0) / (wg_out_packets_delta + 0)
-        if (min_packet_size == "" || packet_size_value > (min_packet_size + 0)) {
+        if (packet_size_floor == "" || packet_size_value > (packet_size_floor + 0)) {
           packet_size_sent[rows] = packet_size_value
         }
       }
@@ -725,8 +751,8 @@ render_distribution() {
     if (cutoff_ts != "") {
       printf "as_of_timestamp_unix_ms=%s\n", cutoff_ts
     }
-    if (min_packet_size != "") {
-      printf "min_packet_size_exclusive_gt=%s\n", min_packet_size
+    if (packet_size_floor != "") {
+      printf "packet_size_floor_exclusive_gt=%s\n", packet_size_floor
     }
     printf "rows=%d window_rows=%d latest_timestamp_unix_ms=%s latest_interval_seconds=%s\n", rows, rows - start + 1, ts[rows], interval[rows]
 
@@ -739,7 +765,7 @@ render_distribution() {
 parse_args() {
   if [[ $# -eq 0 ]]; then
     print_usage
-    die "Missing subcommand: trends|distribution"
+    die "Missing subcommand: trends|distribution|collect"
   fi
 
   if [[ "$1" == "-h" || "$1" == "--help" ]]; then
@@ -749,7 +775,7 @@ parse_args() {
 
   if [[ "$1" == -* ]]; then
     print_usage
-    die "Subcommand must be first argument: trends|distribution"
+    die "Subcommand must be first argument: trends|distribution|collect"
   fi
 
   case "$1" in
@@ -762,28 +788,14 @@ parse_args() {
       ;;
   esac
 
-  if [[ "$SUBCOMMAND" == "collect" ]]; then
-    INTERVAL_SECONDS="10"
-  fi
-
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --input)
+      --data)
         require_option_value "$1" "${2:-}"
-        INPUT="${2:-}"
+        DATA_DIR="${2:-}"
         shift 2
         ;;
-      --raw-output)
-        require_option_value "$1" "${2:-}"
-        RAW_OUTPUT="${2:-}"
-        shift 2
-        ;;
-      --growth-output)
-        require_option_value "$1" "${2:-}"
-        GROWTH_OUTPUT="${2:-}"
-        shift 2
-        ;;
-      --interval-seconds)
+      --interval)
         require_option_value "$1" "${2:-}"
         INTERVAL_SECONDS="${2:-}"
         shift 2
@@ -799,21 +811,21 @@ parse_args() {
         ;;
       --once)
         ONCE="1"
-        if [[ "$SUBCOMMAND" != "collect" && $# -ge 2 && "$2" != -* ]]; then
-          ONCE_TIMESTAMP_UNIX_MS="$2"
-          shift 2
-        else
-          shift
-        fi
+        shift
+        ;;
+      --at)
+        require_option_value "$1" "${2:-}"
+        ONCE_TIMESTAMP_UNIX_MS="${2:-}"
+        shift 2
         ;;
       --format)
         require_option_value "$1" "${2:-}"
         FORMAT="${2:-}"
         shift 2
         ;;
-      --min_packet_size)
+      --packet-size-floor)
         require_option_value "$1" "${2:-}"
-        MIN_PACKET_SIZE="${2:-}"
+        PACKET_SIZE_FLOOR="${2:-}"
         shift 2
         ;;
       --iface)
@@ -835,26 +847,27 @@ parse_args() {
     esac
   done
 
-  is_positive_number "$INTERVAL_SECONDS" || die "--interval-seconds must be > 0"
+  is_positive_number "$INTERVAL_SECONDS" || die "--interval must be > 0"
+
+  INPUT="$DATA_DIR/growth.csv"
+  RAW_OUTPUT="$DATA_DIR/raw.csv"
+  GROWTH_OUTPUT="$DATA_DIR/growth.csv"
 
   case "$SUBCOMMAND" in
     trends|distribution)
-      [[ -n "$INPUT" ]] || die "--input requires a path"
       is_positive_integer "$WINDOW" || die "--window must be a positive integer"
       case "$FORMAT" in
         plain|md) ;;
         *) die "--format must be one of: plain, md" ;;
       esac
-      if [[ -n "${MIN_PACKET_SIZE:-}" ]]; then
-        is_non_negative_number "$MIN_PACKET_SIZE" || die "--min_packet_size must be a non-negative number"
+      if [[ -n "${PACKET_SIZE_FLOOR:-}" ]]; then
+        is_non_negative_number "$PACKET_SIZE_FLOOR" || die "--packet-size-floor must be a non-negative number"
       fi
       if [[ -n "$ONCE_TIMESTAMP_UNIX_MS" ]]; then
-        is_non_negative_integer "$ONCE_TIMESTAMP_UNIX_MS" || die "--once timestamp must be a non-negative integer (unix ms)"
+        is_non_negative_integer "$ONCE_TIMESTAMP_UNIX_MS" || die "--at must be a non-negative integer (unix ms)"
       fi
       ;;
     collect)
-      [[ -n "$RAW_OUTPUT" ]] || die "--raw-output requires a path"
-      [[ -n "$GROWTH_OUTPUT" ]] || die "--growth-output requires a path"
       [[ -n "$IFACE" ]] || die "--iface requires a value"
       ;;
   esac
