@@ -12,14 +12,15 @@ A shell script tool for capturing GnosisVPN / HOPR interface counters at a confi
 | `trends` | Live terminal dashboard with sparklines for rate/ratio metrics and derived packet sizes |
 | `distribution` | Packet-size histogram (incoming / outgoing) from growth deltas |
 
-Data is stored in `data/` (git-ignored).
+All subcommands share a single `--data DIR` flag pointing to the data directory. `collect` writes `DIR/raw.csv` and `DIR/growth.csv` there; `trends` and `distribution` read `DIR/growth.csv` from it.
 
 ## Requirements
 
 - macOS or Linux with `bash`
-- `netstat`
 - `wg` (`wireguard-tools`) — `sudo` access required
 - `gnosis_vpn-ctl` with a working `telemetry` subcommand
+- macOS: `netstat` (BSD) for interface stats
+- Linux: `/proc/net/dev` (available on all Linux kernels)
 
 ## Usage
 
@@ -27,28 +28,28 @@ Data is stored in `data/` (git-ignored).
 
 ```bash
 ./watch_interface_statistics.sh collect \
-  --interval-seconds 10 \
-  --raw-output data/vpn_metrics_raw.csv \
-  --growth-output data/vpn_metrics_growth.csv
+  --data data/ \
+  --iface utun4 \
+  --interval 10
 ```
 
-Defaults: interface `utun4`, `sudo wg show`, `gnosis_vpn-ctl telemetry`.
+Defaults: `--data data`, `sudo wg show`, `gnosis_vpn-ctl telemetry`. `--iface` is required.
 
 Useful flags:
 
 ```bash
-./watch_interface_statistics.sh collect --once           # single snapshot and exit
-./watch_interface_statistics.sh collect --iface utun4   # specify network interface
+./watch_interface_statistics.sh collect --data data/ --iface utun4 --once   # single snapshot (macOS)
+./watch_interface_statistics.sh collect --data data/ --iface wg0 --once     # single snapshot (Linux)
 ```
 
-> If you already have a raw CSV from a previous format, start with a new file path — the collector enforces the current schema and will reject mismatches.
+> If you already have a raw CSV from a previous format, point `--data` to a fresh directory — the collector enforces the current schema and will reject mismatches.
 
 ### Trends — live terminal dashboard
 
 ```bash
 ./watch_interface_statistics.sh trends \
-  --input data/vpn_metrics_growth.csv \
-  --interval-seconds 2 \
+  --data data/ \
+  --interval 2 \
   --window 40
 ```
 
@@ -57,8 +58,8 @@ Key flags:
 | Flag | Description |
 |---|---|
 | `--once` | Render one snapshot and exit |
-| `--once <timestamp_unix_ms>` | Render as of a specific timestamp (rows after it are ignored) |
-| `--min_packet_size <bytes>` | Exclude packet-size values `<=` threshold from stats |
+| `--at <timestamp_unix_ms>` | Render as of a specific timestamp (rows after it are ignored) |
+| `--packet-size-floor <bytes>` | Exclude packet-size values `<=` this threshold from stats |
 | `--format md` | Render the metrics table as Markdown |
 
 The dashboard shows sparkline blocks (`▁▂▃▄▅▆▇█`) per metric and includes derived columns:
@@ -69,14 +70,14 @@ The dashboard shows sparkline blocks (`▁▂▃▄▅▆▇█`) per metric and
 
 ```bash
 ./watch_interface_statistics.sh distribution \
-  --input data/vpn_metrics_growth.csv \
-  --interval-seconds 2 \
+  --data data/ \
+  --interval 2 \
   --window 40
 ```
 
 Computes per-step packet sizes from growth deltas and shows histogram bins for `incoming_packet_size_b_per_wg_packet` and `outgoing_packet_size_b_per_wg_packet`.
 
-`--format md` and `--min_packet_size` also apply here.
+`--format md` and `--packet-size-floor` also apply here.
 
 ## CSV Schema
 
